@@ -12,6 +12,11 @@ New TF-IDF engine symbols:
     MemoryEntry (lightweight frozen dataclass, from contradiction.models),
     Contradiction, Resolution, ContradictionType,
     KeepNewerStrategy, KeepBothStrategy, FlagForReviewStrategy, MergeStrategy
+
+E14.2 resolution orchestrator:
+    ContradictionResolutionOrchestrator, ResolutionResult (frozen dataclass),
+    ResolutionStrategyBase,
+    LatestWinsStrategy, UserConfirmationStrategy, MergeResolutionStrategy
 """
 
 from __future__ import annotations
@@ -40,6 +45,18 @@ from agent_memory.contradiction.strategies import (
     ResolutionStrategyProtocol,
 )
 
+# E14.2: New resolution orchestrator
+from agent_memory.contradiction.resolution import (
+    ContradictionResolver as ContradictionResolutionOrchestrator,
+    ResolutionResult as ResolutionOutcome,
+    ResolutionStrategyBase,
+)
+from agent_memory.contradiction.resolution_strategies import (
+    LatestWinsStrategy,
+    MergeResolutionStrategy,
+    UserConfirmationStrategy,
+)
+
 __all__ = [
     # Original symbols
     "ContradictionDetector",
@@ -65,4 +82,11 @@ __all__ = [
     "FlagForReviewStrategy",
     "MergeStrategy",
     "ResolutionStrategyProtocol",
+    # E14.2 resolution orchestrator
+    "ContradictionResolutionOrchestrator",
+    "ResolutionOutcome",
+    "ResolutionStrategyBase",
+    "LatestWinsStrategy",
+    "MergeResolutionStrategy",
+    "UserConfirmationStrategy",
 ]

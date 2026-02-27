@@ -22,6 +22,8 @@ from __future__ import annotations
 
 __version__: str = "0.1.0"
 
+from agent_memory.convenience import Memory
+
 # ---------------------------------------------------------------------------
 # Core memory types
 # ---------------------------------------------------------------------------
@@ -123,6 +125,7 @@ except ImportError:
 __all__ = [
     # Version
     "__version__",
+    "Memory",
     # Core types
     "MemoryEntry",
     "MemoryLayer",
