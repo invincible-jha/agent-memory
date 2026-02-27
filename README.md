@@ -52,9 +52,8 @@ import agent_memory
 
 ## Enterprise Upgrade
 
-The open-source edition provides the core foundation. For production
-deployments requiring SLA-backed support, advanced integrations, and the full
-AgentBrain platform, see [docs/UPGRADE_TO_AgentBrain.md](docs/UPGRADE_TO_AgentBrain.md).
+For production deployments requiring SLA-backed support and advanced
+integrations, contact the maintainers or see the commercial extensions documentation.
 
 ## Contributing
 

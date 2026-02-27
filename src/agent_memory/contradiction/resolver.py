@@ -1,4 +1,18 @@
-"""Contradiction resolver — strategies for resolving detected contradictions."""
+"""Contradiction resolver — strategies for resolving detected contradictions.
+
+Two resolver classes are exported:
+
+ContradictionResolver (original, backward-compatible)
+    Works with the Pydantic ``ContradictionPair`` / ``MemoryEntry`` types from
+    the existing codebase.  Supports ``RECENCY_WINS``, ``SOURCE_PRIORITY``,
+    ``CONFIDENCE_BASED``, and ``MANUAL`` strategies.
+
+SimpleContradictionResolver
+    Lightweight resolver that works with the frozen dataclass types from
+    ``contradiction.models`` (``Contradiction``, ``Resolution``).  Dispatches
+    to the strategy implementations in ``contradiction.strategies`` using a
+    plain string strategy name.  Suitable for use with ``TFIDFContradictionDetector``.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +21,20 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
+from agent_memory.contradiction.models import Contradiction, Resolution
 from agent_memory.contradiction.report import ContradictionPair
+from agent_memory.contradiction.strategies import (
+    FlagForReviewStrategy,
+    KeepBothStrategy,
+    KeepNewerStrategy,
+    MergeStrategy,
+)
 from agent_memory.memory.types import MemoryEntry
+
+
+# ---------------------------------------------------------------------------
+# Original resolver (backward-compatible)
+# ---------------------------------------------------------------------------
 
 
 class ResolutionStrategy(str, Enum):
@@ -274,10 +300,164 @@ class ContradictionResolver:
         )
 
 
+# ---------------------------------------------------------------------------
+# SimpleContradictionResolver (works with new lightweight model types)
+# ---------------------------------------------------------------------------
+
+# Registry mapping strategy name strings to strategy class instances.
+# This is intentionally built lazily (at first use) to keep module import cost low.
+_STRATEGY_REGISTRY: dict[str, object] = {}
+
+
+def _get_strategy_registry() -> dict[str, object]:
+    global _STRATEGY_REGISTRY
+    if not _STRATEGY_REGISTRY:
+        _STRATEGY_REGISTRY = {
+            "keep_newer": KeepNewerStrategy(),
+            "keep_older": _KeepOlderStrategy(),
+            "keep_both_with_context": KeepBothStrategy(),
+            "flag_for_review": FlagForReviewStrategy(),
+            "merge": MergeStrategy(),
+        }
+    return _STRATEGY_REGISTRY
+
+
+class _KeepOlderStrategy:
+    """Internal strategy: keeps the oldest entry and archives the newer one."""
+
+    def apply(self, contradiction: Contradiction) -> Resolution:
+        entry_a = contradiction.entry_a
+        entry_b = contradiction.entry_b
+
+        from datetime import timezone as tz
+
+        def _utc(dt_val: object) -> object:
+            from datetime import datetime
+
+            if not isinstance(dt_val, datetime):
+                return dt_val
+            if dt_val.tzinfo is None:
+                return dt_val.replace(tzinfo=tz.utc)
+            return dt_val.astimezone(tz.utc)
+
+        ts_a = _utc(entry_a.timestamp)
+        ts_b = _utc(entry_b.timestamp)
+
+        from datetime import datetime
+
+        if isinstance(ts_a, datetime) and isinstance(ts_b, datetime):
+            if ts_a <= ts_b:
+                kept = entry_a
+                archived = entry_b
+            else:
+                kept = entry_b
+                archived = entry_a
+        else:
+            kept = entry_a
+            archived = entry_b
+
+        return Resolution(
+            strategy_used="keep_older",
+            kept_entries=(kept,),
+            archived_entries=(archived,),
+            notes=(
+                f"Kept older entry '{kept.id}' and archived newer entry '{archived.id}'."
+            ),
+        )
+
+
+_VALID_STRATEGY_NAMES: frozenset[str] = frozenset(
+    ["keep_newer", "keep_older", "keep_both_with_context", "flag_for_review", "merge"]
+)
+
+
+class SimpleContradictionResolver:
+    """Lightweight resolver for the frozen-dataclass contradiction model.
+
+    Accepts a ``Contradiction`` (from ``contradiction.models``) and dispatches
+    to the named strategy implementation from ``contradiction.strategies``.
+
+    Parameters
+    ----------
+    default_strategy:
+        Name of the default strategy to use when ``resolve()`` is called
+        without an explicit ``strategy`` argument.  Must be one of:
+        ``'keep_newer'``, ``'keep_older'``, ``'keep_both_with_context'``,
+        ``'flag_for_review'``, ``'merge'``.
+
+    Example
+    -------
+    >>> resolver = SimpleContradictionResolver()
+    >>> resolution = resolver.resolve(contradiction, strategy="keep_newer")
+    """
+
+    def __init__(self, default_strategy: str = "keep_newer") -> None:
+        if default_strategy not in _VALID_STRATEGY_NAMES:
+            raise ValueError(
+                f"Unknown strategy {default_strategy!r}. "
+                f"Valid options: {sorted(_VALID_STRATEGY_NAMES)!r}"
+            )
+        self._default_strategy = default_strategy
+
+    @property
+    def default_strategy(self) -> str:
+        return self._default_strategy
+
+    def resolve(
+        self,
+        contradiction: Contradiction,
+        strategy: Optional[str] = None,
+    ) -> Resolution:
+        """Resolve a contradiction using the specified strategy.
+
+        Parameters
+        ----------
+        contradiction:
+            The detected contradiction to resolve.
+        strategy:
+            Strategy name override.  Falls back to ``default_strategy`` when
+            ``None``.  Must be one of ``'keep_newer'``, ``'keep_older'``,
+            ``'keep_both_with_context'``, ``'flag_for_review'``, ``'merge'``.
+
+        Returns
+        -------
+        Resolution
+            The resolution outcome.
+
+        Raises
+        ------
+        ValueError
+            If the strategy name is not recognised.
+        """
+        active_strategy = strategy if strategy is not None else self._default_strategy
+
+        registry = _get_strategy_registry()
+        strategy_obj = registry.get(active_strategy)
+
+        if strategy_obj is None:
+            raise ValueError(
+                f"Unknown strategy {active_strategy!r}. "
+                f"Valid options: {sorted(_VALID_STRATEGY_NAMES)!r}"
+            )
+
+        # All strategy objects expose .apply(contradiction) -> Resolution
+        return strategy_obj.apply(contradiction)  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
 def _to_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
 
-__all__ = ["ContradictionResolver", "ResolutionResult", "ResolutionStrategy"]
+__all__ = [
+    "ContradictionResolver",
+    "ResolutionResult",
+    "ResolutionStrategy",
+    "SimpleContradictionResolver",
+]
