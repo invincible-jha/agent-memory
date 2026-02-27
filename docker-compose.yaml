@@ -5,15 +5,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: aumos/agent-memory:latest
+    image: ghcr.io/invincible-jha/agent-memory:latest
     container_name: agent-memory
     ports:
-      - "8081:8080"
+      - "8084:8084"
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8084/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
