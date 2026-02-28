@@ -1,0 +1,12 @@
+apiVersion: v2
+name: agent-memory
+description: 4-layer cognitive memory and knowledge management
+type: application
+version: 0.1.0
+appVersion: "0.2.0"
+home: https://github.com/invincible-jha/agent-memory
+sources:
+  - https://github.com/invincible-jha/agent-memory
+maintainers:
+  - name: AumOS
+    url: https://github.com/invincible-jha
