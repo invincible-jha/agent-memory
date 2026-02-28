@@ -1,0 +1,384 @@
+openapi: "3.1.0"
+
+info:
+  title: Agent Memory API
+  version: "0.2.0"
+  description: |
+    HTTP API for the agent-memory server. Provides endpoints for storing,
+    retrieving, searching, and deleting memory entries across episodic,
+    semantic, and procedural memory layers.
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:8084
+    description: Local development server
+
+tags:
+  - name: memories
+    description: Create, retrieve, and delete memory entries
+  - name: search
+    description: Search memory entries by keyword and layer
+  - name: health
+    description: Server health check
+
+paths:
+  /memories:
+    post:
+      tags: [memories]
+      operationId: createMemory
+      summary: Store a new memory entry
+      description: |
+        Creates and stores a new memory entry. The layer controls which
+        memory tier the entry belongs to (episodic, semantic, procedural).
+        Returns the full memory record including computed scores.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMemoryRequest"
+            example:
+              content: "The user prefers concise bullet-point summaries."
+              layer: "semantic"
+              importance_score: 0.8
+              source: "agent_inference"
+              safety_critical: false
+              metadata:
+                context: "user_preferences"
+                session_id: "session-001"
+      responses:
+        "201":
+          description: Memory entry stored successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryResponse"
+              example:
+                memory_id: "550e8400-e29b-41d4-a716-446655440001"
+                content: "The user prefers concise bullet-point summaries."
+                layer: "semantic"
+                importance_score: 0.8
+                freshness_score: 1.0
+                source: "agent_inference"
+                safety_critical: false
+                composite_score: 0.85
+                importance_level: "high"
+                created_at: "2026-02-27T12:00:00+00:00"
+                last_accessed: "2026-02-27T12:00:00+00:00"
+                access_count: 0
+                metadata:
+                  context: "user_preferences"
+        "422":
+          description: Validation error — invalid layer, source, or field value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "Invalid layer"
+                detail: "Layer 'unknown' is not valid. Choose from: ['episodic', 'semantic', 'procedural']"
+
+  /memories/{memory_id}:
+    get:
+      tags: [memories]
+      operationId: getMemory
+      summary: Retrieve a specific memory entry
+      description: |
+        Returns the full memory record for the given memory_id. Each
+        retrieval increments the access_count and updates last_accessed.
+      parameters:
+        - name: memory_id
+          in: path
+          required: true
+          description: UUID of the memory entry to retrieve
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440001"
+      responses:
+        "200":
+          description: Memory entry found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryResponse"
+        "404":
+          description: Memory not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "Not found"
+                detail: "Memory '550e8400-e29b-41d4-a716-446655440001' not found."
+
+    delete:
+      tags: [memories]
+      operationId: deleteMemory
+      summary: Delete a specific memory entry
+      description: Permanently removes the memory entry with the given memory_id.
+      parameters:
+        - name: memory_id
+          in: path
+          required: true
+          description: UUID of the memory entry to delete
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440001"
+      responses:
+        "200":
+          description: Memory deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteMemoryResponse"
+              example:
+                memory_id: "550e8400-e29b-41d4-a716-446655440001"
+                deleted: true
+        "404":
+          description: Memory not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /search:
+    get:
+      tags: [search]
+      operationId: searchMemories
+      summary: Search memory entries by keyword
+      description: |
+        Performs case-insensitive substring matching against memory content.
+        Results are sorted by composite_score descending. Optionally filtered
+        by memory layer.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: Search term for substring matching against memory content
+          schema:
+            type: string
+          example: "user preferences"
+        - name: layer
+          in: query
+          required: false
+          description: Filter results to a specific memory layer
+          schema:
+            type: string
+            enum: [episodic, semantic, procedural]
+          example: "semantic"
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of results to return (default 20)
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 500
+          example: 10
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+              example:
+                query: "user preferences"
+                results:
+                  - memory_id: "550e8400-e29b-41d4-a716-446655440001"
+                    content: "The user prefers concise bullet-point summaries."
+                    layer: "semantic"
+                    importance_score: 0.8
+                    freshness_score: 0.95
+                    source: "agent_inference"
+                    safety_critical: false
+                    composite_score: 0.85
+                    importance_level: "high"
+                    created_at: "2026-02-27T12:00:00+00:00"
+                    last_accessed: "2026-02-27T12:05:00+00:00"
+                    access_count: 2
+                    metadata: {}
+                total: 1
+
+  /health:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Health check
+      description: Returns server status and current memory entry count.
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: "ok"
+                service: "agent-memory"
+                version: "0.1.0"
+                memory_count: 256
+
+components:
+  schemas:
+    CreateMemoryRequest:
+      type: object
+      description: Request body for storing a new memory entry.
+      required: [content]
+      properties:
+        content:
+          type: string
+          description: The text content of the memory to store
+        layer:
+          type: string
+          default: "episodic"
+          description: Memory layer tier
+          enum: [episodic, semantic, procedural]
+        importance_score:
+          type: number
+          format: double
+          default: 0.5
+          minimum: 0.0
+          maximum: 1.0
+          description: Importance weight in [0.0, 1.0]; higher means more likely to be retained
+        source:
+          type: string
+          default: "agent_inference"
+          description: Source of this memory
+          enum:
+            - agent_inference
+            - user_explicit
+            - tool_output
+            - external_document
+            - system
+        safety_critical:
+          type: boolean
+          default: false
+          description: Whether this memory contains safety-critical information
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          default: {}
+          description: Arbitrary string key-value labels
+
+    MemoryResponse:
+      type: object
+      description: Full memory entry record.
+      required:
+        - memory_id
+        - content
+        - layer
+        - importance_score
+        - freshness_score
+        - source
+        - safety_critical
+        - composite_score
+        - importance_level
+        - created_at
+        - last_accessed
+        - access_count
+      properties:
+        memory_id:
+          type: string
+          format: uuid
+          description: Unique identifier for this memory entry
+        content:
+          type: string
+        layer:
+          type: string
+          description: Memory layer (episodic, semantic, procedural)
+        importance_score:
+          type: number
+          format: double
+        freshness_score:
+          type: number
+          format: double
+          description: Decay-adjusted freshness score in [0.0, 1.0]
+        source:
+          type: string
+        safety_critical:
+          type: boolean
+        composite_score:
+          type: number
+          format: double
+          description: Weighted combination of importance and freshness
+        importance_level:
+          type: string
+          description: Human-readable importance tier (low, medium, high, critical)
+          enum: [low, medium, high, critical]
+        created_at:
+          type: string
+          format: date-time
+        last_accessed:
+          type: string
+          format: date-time
+        access_count:
+          type: integer
+          description: Number of times this memory has been retrieved
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          default: {}
+
+    SearchResponse:
+      type: object
+      description: Memory search results.
+      required: [query, results, total]
+      properties:
+        query:
+          type: string
+          description: The search term used
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/MemoryResponse"
+        total:
+          type: integer
+          description: Number of results returned
+
+    DeleteMemoryResponse:
+      type: object
+      description: Confirmation of memory deletion.
+      required: [memory_id, deleted]
+      properties:
+        memory_id:
+          type: string
+          format: uuid
+        deleted:
+          type: boolean
+
+    HealthResponse:
+      type: object
+      description: Server health information.
+      required: [status, service, version, memory_count]
+      properties:
+        status:
+          type: string
+          default: "ok"
+        service:
+          type: string
+          default: "agent-memory"
+        version:
+          type: string
+          default: "0.1.0"
+        memory_count:
+          type: integer
+          description: Number of memory entries currently stored in memory
+
+    ErrorResponse:
+      type: object
+      description: Standard error response body.
+      required: [error]
+      properties:
+        error:
+          type: string
+        detail:
+          type: string
+          default: ""
