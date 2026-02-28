@@ -40,7 +40,6 @@ import type {
   ForgetResult,
   KnowledgeGraph,
   MemoryEntry,
-  RetrievalQuery,
   RetrievalResult,
   SearchQuery,
   StoreRequest,
@@ -293,18 +292,3 @@ export function createAgentMemoryClient(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Re-export advanced retrieval query type
-// ---------------------------------------------------------------------------
-
-export type {
-  StoreRequest,
-  MemoryEntry,
-  SearchQuery,
-  RetrievalQuery,
-  RetrievalResult,
-  ForgetQuery,
-  ForgetResult,
-  KnowledgeGraph,
-  CompactResult,
-};
