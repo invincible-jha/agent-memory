@@ -21,6 +21,14 @@ Part of the [AumOS](https://github.com/aumos-ai) open-source agent infrastructur
 - `AutoMemorizeMiddleware` and `ContextBuilder` work together to automatically memorize tool outputs and construct retrieval-augmented context windows for LLM calls
 - Freshness validation and forced refresh policies prevent stale semantic memories from being surfaced in time-sensitive retrieval queries
 
+## Current Limitations
+
+> **Transparency note**: We list known limitations to help you evaluate fit.
+
+- **Vector Search**: TF-IDF only — no neural/embedding-based search yet. No pgvector or Pinecone integration.
+- **Async**: Synchronous API only. Async storage backends not yet available.
+- **Scale**: In-memory and SQLite backends; not designed for >100K entries without external storage.
+
 ## Quick Start
 
 Install from PyPI:

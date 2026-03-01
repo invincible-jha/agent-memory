@@ -5,10 +5,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from agent_memory.memory.base import MemoryStore
 from agent_memory.memory.types import MemoryEntry, MemoryLayer
+
+if TYPE_CHECKING:
+    from agent_memory.vector.protocol import EmbedderProtocol, VectorStoreProtocol
+    from agent_memory.vector.types import VectorSearchResult
 
 
 @dataclass
@@ -141,6 +145,143 @@ class MemorySearchEngine:
         if store is None:
             return []
         return list(store.all(layer=layer))[:limit]
+
+    def vector_search(
+        self,
+        query_text: str,
+        embedder: "EmbedderProtocol",
+        vector_store: "VectorStoreProtocol",
+        top_k: int = 10,
+        min_score: float = 0.0,
+        text_weight: float = 0.5,
+        layer: Optional[MemoryLayer] = None,
+    ) -> list[SearchResult]:
+        """Search memory using vector similarity, optionally fused with text search.
+
+        The query text is embedded and used to search the vector store.
+        Optionally, results are fused with a text-based search from the
+        registered memory stores.
+
+        When ``text_weight`` is ``0.0``, only vector scores are used.
+        When ``text_weight`` is ``1.0``, only text scores are used.
+        Any value in between blends both signals proportionally.
+
+        The returned :class:`SearchResult` objects are constructed by
+        matching vector keys (assumed to be ``memory_id`` values) against
+        entries in the registered memory stores, or by synthesising a
+        minimal :class:`~agent_memory.memory.types.MemoryEntry` when no
+        matching store entry is found.
+
+        Parameters
+        ----------
+        query_text:
+            Free-text query to embed and search.
+        embedder:
+            An :class:`~agent_memory.vector.protocol.EmbedderProtocol`
+            implementation used to embed ``query_text``.
+        vector_store:
+            A :class:`~agent_memory.vector.protocol.VectorStoreProtocol`
+            implementation to search against.
+        top_k:
+            Maximum number of results to return.
+        min_score:
+            Minimum vector similarity threshold.
+        text_weight:
+            Weight for the text search signal in ``[0.0, 1.0]``.  The
+            vector signal weight is ``1.0 - text_weight``.  Defaults to
+            ``0.5`` (equal blend).
+        layer:
+            If provided, text search is limited to this layer.  Vector
+            results are returned regardless of layer.
+
+        Returns
+        -------
+        list[SearchResult]
+            Results sorted by fused score descending.
+        """
+        vector_weight: float = max(0.0, min(1.0, 1.0 - text_weight))
+        clamped_text_weight: float = max(0.0, min(1.0, text_weight))
+
+        # Embed the query and search the vector store
+        query_vector: list[float] = embedder.embed(query_text)
+        vector_results: list[VectorSearchResult] = vector_store.search(
+            query_vector, top_k=top_k, min_score=min_score
+        )
+
+        # Build a map of memory_id -> vector score for fast lookup
+        vector_score_map: dict[str, float] = {
+            vr.key: vr.score for vr in vector_results
+        }
+
+        # Optionally run text search to blend scores
+        text_score_map: dict[str, float] = {}
+        if clamped_text_weight > 0.0 and self._stores:
+            text_results = self.search(
+                query_text,
+                layer=layer,
+                limit=top_k,
+            )
+            for text_result in text_results:
+                text_score_map[text_result.entry.memory_id] = text_result.score
+
+        # Build a set of all candidate memory IDs
+        all_ids: set[str] = set(vector_score_map.keys()) | set(text_score_map.keys())
+
+        # Build a lookup of memory_id -> (entry, layer) from registered stores
+        entry_map: dict[str, tuple[MemoryEntry, MemoryLayer]] = {}
+        for store_layer, store in self._stores.items():
+            if layer is not None and store_layer is not layer:
+                continue
+            for stored_entry in store.all(layer=store_layer):
+                if stored_entry.memory_id in all_ids:
+                    entry_map[stored_entry.memory_id] = (stored_entry, store_layer)
+
+        # Compute fused scores and build results
+        fused: list[SearchResult] = []
+        for memory_id in all_ids:
+            v_score: float = vector_score_map.get(memory_id, 0.0)
+            t_score: float = text_score_map.get(memory_id, 0.0)
+
+            if clamped_text_weight == 0.0:
+                fused_score = v_score
+            elif vector_weight == 0.0:
+                fused_score = t_score
+            else:
+                fused_score = vector_weight * v_score + clamped_text_weight * t_score
+
+            if memory_id in entry_map:
+                entry, matched_layer = entry_map[memory_id]
+            else:
+                # No matching store entry; synthesise a minimal entry from vector metadata
+                matched_layer = layer or MemoryLayer.SEMANTIC
+                # Look up metadata from vector results
+                vector_metadata: dict[str, object] = {}
+                for vr in vector_results:
+                    if vr.key == memory_id:
+                        vector_metadata = vr.metadata
+                        break
+                entry = MemoryEntry(
+                    memory_id=memory_id,
+                    content=str(vector_metadata.get("content", "")),
+                    layer=matched_layer,
+                )
+
+            fused.append(
+                SearchResult(
+                    entry=entry,
+                    score=round(fused_score, 6),
+                    rank=0,
+                    matched_layer=matched_layer,
+                    query=query_text,
+                )
+            )
+
+        fused.sort()  # descending by score via __lt__
+
+        for rank_idx, result in enumerate(fused[:top_k]):
+            result.rank = rank_idx + 1
+
+        return fused[:top_k]
 
     # ------------------------------------------------------------------
     # Private helpers

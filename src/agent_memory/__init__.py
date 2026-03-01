@@ -122,6 +122,31 @@ try:
 except ImportError:
     pass  # redis not installed
 
+# Vector search — protocol, types, and SQLite store are always available
+from agent_memory.vector.protocol import (
+    EmbedderProtocol as EmbedderProtocol,
+    VectorStoreProtocol as VectorStoreProtocol,
+)
+from agent_memory.vector.types import (
+    VectorEntry as VectorEntry,
+    VectorSearchResult as VectorSearchResult,
+)
+from agent_memory.vector.sqlite_vector_store import (
+    SQLiteVectorStore as SQLiteVectorStore,
+)
+
+try:
+    from agent_memory.vector.numpy_store import NumpyVectorStore as NumpyVectorStore
+except ImportError:
+    pass  # numpy not installed
+
+try:
+    from agent_memory.vector.embedder import (
+        SentenceTransformerEmbedder as SentenceTransformerEmbedder,
+    )
+except ImportError:
+    pass  # sentence-transformers not installed
+
 __all__ = [
     # Version
     "__version__",
@@ -185,4 +210,12 @@ __all__ = [
     "ContextSection",
     # Plugins
     "PluginRegistry",
+    # Vector search (requires numpy/sentence-transformers extras — conditionally present)
+    "EmbedderProtocol",
+    "VectorStoreProtocol",
+    "VectorEntry",
+    "VectorSearchResult",
+    "SQLiteVectorStore",
+    "NumpyVectorStore",
+    "SentenceTransformerEmbedder",
 ]

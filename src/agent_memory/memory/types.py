@@ -74,6 +74,7 @@ class MemoryEntry(BaseModel):
     access_count: int = Field(default=0, ge=0)
     safety_critical: bool = False
     metadata: dict[str, str] = Field(default_factory=dict)
+    embedding: list[float] | None = Field(default=None)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

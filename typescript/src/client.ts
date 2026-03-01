@@ -1,14 +1,23 @@
 /**
  * HTTP client for the agent-memory API.
  *
- * Uses the Fetch API (available natively in Node 18+, browsers, and Deno).
- * No external dependencies required.
+ * Backed by @aumos/sdk-core's createHttpClient which provides automatic retry
+ * with exponential backoff, typed error hierarchy, request lifecycle events,
+ * and abort signal support.
+ *
+ * The public API surface is unchanged — all methods still return ApiResult<T>
+ * so existing callers require no migration work.
  *
  * @example
  * ```ts
  * import { createAgentMemoryClient } from "@aumos/agent-memory";
  *
  * const client = createAgentMemoryClient({ baseUrl: "http://localhost:8060" });
+ *
+ * // Attach a retry observer via sdk-core events
+ * client.events.on("request:retry", ({ payload }) => {
+ *   console.warn(`Memory API retry attempt ${payload.attempt}`);
+ * });
  *
  * // Store a new memory in the semantic layer
  * const stored = await client.store({
@@ -21,16 +30,21 @@
  * if (stored.ok) {
  *   console.log("Memory stored:", stored.data.memory_id);
  * }
- *
- * // Hybrid retrieval across all layers
- * const results = await client.search({ query: "Eiffel Tower", limit: 5 });
- * if (results.ok) {
- *   for (const result of results.data) {
- *     console.log(`[${result.source}] score=${result.score} — ${result.content}`);
- *   }
- * }
  * ```
  */
+
+import {
+  createHttpClient,
+  HttpError,
+  NetworkError,
+  TimeoutError,
+  RateLimitError,
+  ServerError,
+  ValidationError,
+  AumosError,
+} from "@aumos/sdk-core";
+
+import type { HttpClient, SdkEventEmitter } from "@aumos/sdk-core";
 
 import type {
   ApiError,
@@ -40,6 +54,7 @@ import type {
   ForgetResult,
   KnowledgeGraph,
   MemoryEntry,
+  MemoryLayer,
   RetrievalResult,
   SearchQuery,
   StoreRequest,
@@ -57,58 +72,101 @@ export interface AgentMemoryClientConfig {
   readonly timeoutMs?: number;
   /** Optional extra HTTP headers sent with every request. */
   readonly headers?: Readonly<Record<string, string>>;
+  /** Optional maximum retry count. Defaults to 3. */
+  readonly maxRetries?: number;
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Internal adapter — bridges HttpClient throws into ApiResult<T>
 // ---------------------------------------------------------------------------
 
-async function fetchJson<T>(
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
+function extractApiError(body: unknown, fallbackMessage: string): ApiError {
+  if (
+    body !== null &&
+    typeof body === "object" &&
+    "error" in body &&
+    typeof (body as Record<string, unknown>)["error"] === "string"
+  ) {
+    const candidate = body as Partial<{ error: string; detail: string }>;
+    return {
+      error: candidate.error ?? fallbackMessage,
+      detail: candidate.detail ?? "",
+    };
+  }
+  return { error: fallbackMessage, detail: "" };
+}
+
+async function executeApiCall<T>(
+  call: () => Promise<T>,
 ): Promise<ApiResult<T>> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
-    clearTimeout(timeoutId);
-
-    const body = await response.json() as unknown;
-
-    if (!response.ok) {
-      const errorBody = body as Partial<ApiError>;
+    const data = await call();
+    return { ok: true, data };
+  } catch (error: unknown) {
+    if (error instanceof RateLimitError) {
+      return {
+        ok: false,
+        error: extractApiError(error.body, "Rate limit exceeded"),
+        status: 429,
+      };
+    }
+    if (error instanceof ValidationError) {
       return {
         ok: false,
         error: {
-          error: errorBody.error ?? "Unknown error",
-          detail: errorBody.detail ?? "",
+          error: "Validation failed",
+          detail: Object.entries(error.fields)
+            .map(([field, messages]) => `${field}: ${messages.join(", ")}`)
+            .join("; "),
         },
-        status: response.status,
+        status: 422,
       };
     }
-
-    return { ok: true, data: body as T };
-  } catch (err: unknown) {
-    clearTimeout(timeoutId);
-    const message = err instanceof Error ? err.message : String(err);
+    if (error instanceof ServerError) {
+      return {
+        ok: false,
+        error: extractApiError(error.body, `Server error: HTTP ${error.statusCode}`),
+        status: error.statusCode,
+      };
+    }
+    if (error instanceof HttpError) {
+      return {
+        ok: false,
+        error: extractApiError(error.body, `HTTP error: ${error.statusCode}`),
+        status: error.statusCode,
+      };
+    }
+    if (error instanceof TimeoutError) {
+      return {
+        ok: false,
+        error: { error: "Request timed out", detail: error.message },
+        status: 0,
+      };
+    }
+    if (error instanceof NetworkError) {
+      return {
+        ok: false,
+        error: {
+          error: "Network error",
+          detail: error instanceof Error ? error.message : String(error),
+        },
+        status: 0,
+      };
+    }
+    if (error instanceof AumosError) {
+      return {
+        ok: false,
+        error: { error: error.code, detail: error.message },
+        status: error.statusCode ?? 0,
+      };
+    }
+    const message = error instanceof Error ? error.message : String(error);
     return {
       ok: false,
-      error: { error: "Network error", detail: message },
+      error: { error: "Unknown error", detail: message },
       status: 0,
     };
   }
-}
-
-function buildHeaders(
-  extraHeaders: Readonly<Record<string, string>> | undefined,
-): Record<string, string> {
-  return {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    ...extraHeaders,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -118,10 +176,20 @@ function buildHeaders(
 /** Typed HTTP client for the agent-memory server. */
 export interface AgentMemoryClient {
   /**
-   * Persist a new memory entry in the specified layer.
+   * Typed event emitter exposed from the underlying sdk-core HttpClient.
+   * Attach listeners here to observe request lifecycle, retries, and errors.
    *
-   * The server assigns a unique memory_id and computes the initial
-   * freshness score. Returns the full MemoryEntry as stored.
+   * @example
+   * ```ts
+   * client.events.on("request:retry", ({ payload }) => {
+   *   console.warn(`Retry attempt ${payload.attempt}, delay ${payload.delayMs}ms`);
+   * });
+   * ```
+   */
+  readonly events: SdkEventEmitter;
+
+  /**
+   * Persist a new memory entry in the specified layer.
    *
    * @param request - Content, layer, importance, source, and metadata.
    * @returns The persisted MemoryEntry with server-assigned fields.
@@ -131,9 +199,6 @@ export interface AgentMemoryClient {
   /**
    * Retrieve a specific memory entry by its ID.
    *
-   * Accessing a memory updates its last_accessed timestamp and
-   * increments access_count on the server.
-   *
    * @param memoryId - The UUID of the memory entry to retrieve.
    * @returns The MemoryEntry if found, or a 404 error result.
    */
@@ -141,9 +206,6 @@ export interface AgentMemoryClient {
 
   /**
    * Perform a hybrid (vector + graph + recency) search across memory layers.
-   *
-   * Combines semantic similarity, knowledge graph traversal, and recency
-   * signals, fusing results into a single ranked list.
    *
    * @param query - Query string, optional layer filter, and result limit.
    * @returns Ranked RetrievalResult array from all active retrieval backends.
@@ -153,13 +215,6 @@ export interface AgentMemoryClient {
   /**
    * Remove one or more memory entries matching the given criteria.
    *
-   * When memoryId is provided, only that specific entry is removed.
-   * When layer is provided without memoryId, all entries in that layer
-   * are removed. When belowImportance is provided, entries with an
-   * importance_score below the threshold are candidates for removal.
-   *
-   * Safety-critical entries are never removed by automated forget calls.
-   *
    * @param query - Removal criteria: by ID, layer, or importance threshold.
    * @returns ForgetResult with removed count and IDs.
    */
@@ -168,9 +223,6 @@ export interface AgentMemoryClient {
   /**
    * Retrieve the current knowledge graph structure.
    *
-   * Returns all nodes and directed edges from the semantic knowledge graph,
-   * including node labels, relation types, and edge weights.
-   *
    * @returns KnowledgeGraph snapshot with nodes, edges, and counts.
    */
   getKnowledgeGraph(): Promise<ApiResult<KnowledgeGraph>>;
@@ -178,15 +230,11 @@ export interface AgentMemoryClient {
   /**
    * Trigger a memory compaction pass.
    *
-   * Compaction removes stale low-importance entries, merges near-duplicate
-   * content, and refreshes freshness scores based on access patterns.
-   * The operation runs server-side and returns a summary of changes made.
-   *
    * @param options - Optional compaction parameters.
    * @returns CompactResult with before/after counts and duration.
    */
   compact(options?: {
-    layer?: import("./types.js").MemoryLayer;
+    layer?: MemoryLayer;
     importanceThreshold?: number;
   }): Promise<ApiResult<CompactResult>>;
 }
@@ -198,97 +246,89 @@ export interface AgentMemoryClient {
 /**
  * Create a typed HTTP client for the agent-memory server.
  *
+ * Internally uses @aumos/sdk-core's createHttpClient for automatic retry,
+ * typed errors, and request lifecycle events. The public API remains identical
+ * to the previous version — all methods return ApiResult<T>.
+ *
  * @param config - Client configuration including base URL.
  * @returns An AgentMemoryClient instance.
  */
 export function createAgentMemoryClient(
   config: AgentMemoryClientConfig,
 ): AgentMemoryClient {
-  const { baseUrl, timeoutMs = 30_000, headers: extraHeaders } = config;
-  const baseHeaders = buildHeaders(extraHeaders);
+  const httpClient: HttpClient = createHttpClient({
+    baseUrl: config.baseUrl,
+    timeout: config.timeoutMs ?? 30_000,
+    maxRetries: config.maxRetries ?? 3,
+    defaultHeaders: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(config.headers as Record<string, string> | undefined),
+    },
+  });
 
   return {
-    async store(request: StoreRequest): Promise<ApiResult<MemoryEntry>> {
-      return fetchJson<MemoryEntry>(
-        `${baseUrl}/memory`,
-        {
-          method: "POST",
-          headers: baseHeaders,
-          body: JSON.stringify(request),
-        },
-        timeoutMs,
+    events: httpClient.events,
+
+    store(request: StoreRequest): Promise<ApiResult<MemoryEntry>> {
+      return executeApiCall(() =>
+        httpClient.post<MemoryEntry>("/memory", request).then((r) => r.data),
       );
     },
 
-    async retrieve(memoryId: string): Promise<ApiResult<MemoryEntry>> {
-      return fetchJson<MemoryEntry>(
-        `${baseUrl}/memory/${encodeURIComponent(memoryId)}`,
-        { method: "GET", headers: baseHeaders },
-        timeoutMs,
+    retrieve(memoryId: string): Promise<ApiResult<MemoryEntry>> {
+      return executeApiCall(() =>
+        httpClient
+          .get<MemoryEntry>(`/memory/${encodeURIComponent(memoryId)}`)
+          .then((r) => r.data),
       );
     },
 
-    async search(
-      query: SearchQuery,
-    ): Promise<ApiResult<readonly RetrievalResult[]>> {
-      const params = new URLSearchParams({ query: query.query });
+    search(query: SearchQuery): Promise<ApiResult<readonly RetrievalResult[]>> {
+      const queryParams: Record<string, string> = { query: query.query };
       if (query.layer !== undefined) {
-        params.set("layer", query.layer);
+        queryParams["layer"] = query.layer;
       }
       if (query.limit !== undefined) {
-        params.set("limit", String(query.limit));
+        queryParams["limit"] = String(query.limit);
       }
 
-      return fetchJson<readonly RetrievalResult[]>(
-        `${baseUrl}/memory/search?${params.toString()}`,
-        { method: "GET", headers: baseHeaders },
-        timeoutMs,
+      return executeApiCall(() =>
+        httpClient
+          .get<readonly RetrievalResult[]>("/memory/search", { queryParams })
+          .then((r) => r.data),
       );
     },
 
-    async forget(query: ForgetQuery): Promise<ApiResult<ForgetResult>> {
-      return fetchJson<ForgetResult>(
-        `${baseUrl}/memory/forget`,
-        {
-          method: "POST",
-          headers: baseHeaders,
-          body: JSON.stringify({
+    forget(query: ForgetQuery): Promise<ApiResult<ForgetResult>> {
+      return executeApiCall(() =>
+        httpClient
+          .post<ForgetResult>("/memory/forget", {
             memory_id: query.memoryId,
             layer: query.layer,
             below_importance: query.belowImportance,
-          }),
-        },
-        timeoutMs,
+          })
+          .then((r) => r.data),
       );
     },
 
-    async getKnowledgeGraph(): Promise<ApiResult<KnowledgeGraph>> {
-      return fetchJson<KnowledgeGraph>(
-        `${baseUrl}/memory/graph`,
-        { method: "GET", headers: baseHeaders },
-        timeoutMs,
+    getKnowledgeGraph(): Promise<ApiResult<KnowledgeGraph>> {
+      return executeApiCall(() =>
+        httpClient.get<KnowledgeGraph>("/memory/graph").then((r) => r.data),
       );
     },
 
-    async compact(
-      options: {
-        layer?: import("./types.js").MemoryLayer;
-        importanceThreshold?: number;
-      } = {},
+    compact(
+      options: { layer?: MemoryLayer; importanceThreshold?: number } = {},
     ): Promise<ApiResult<CompactResult>> {
-      return fetchJson<CompactResult>(
-        `${baseUrl}/memory/compact`,
-        {
-          method: "POST",
-          headers: baseHeaders,
-          body: JSON.stringify({
+      return executeApiCall(() =>
+        httpClient
+          .post<CompactResult>("/memory/compact", {
             layer: options.layer,
             importance_threshold: options.importanceThreshold,
-          }),
-        },
-        timeoutMs,
+          })
+          .then((r) => r.data),
       );
     },
   };
 }
-
